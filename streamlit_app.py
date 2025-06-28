@@ -1,151 +1,61 @@
 import streamlit as st
 import pandas as pd
-import math
-from pathlib import Path
+from sklearn.model_selection import train_test_split
+from sklearn.ensemble import RandomForestClassifier
+from fairlearn.metrics import demographic_parity_difference
+import shap
+import matplotlib.pyplot as plt
 
-# Set the title and favicon that appear in the Browser's tab bar.
-st.set_page_config(
-    page_title='GDP dashboard',
-    page_icon=':earth_americas:', # This is an emoji shortcode. Could be a URL too.
-)
+st.title("🚓 AI-Powered Predictive Policing Tool")
+st.write("""
+This tool predicts potential crime hotspots, checks for bias, and explains predictions.
+""")
 
-# -----------------------------------------------------------------------------
-# Declare some useful functions.
+# Upload CSV
+uploaded_file = st.file_uploader("/data.csv", type=["csv"])
 
-@st.cache_data
-def get_gdp_data():
-    """Grab GDP data from a CSV file.
+if uploaded_file is not None:
+    data = pd.read_csv(uploaded_file)
+    st.write("### Preview of Uploaded Data")
+    st.dataframe(data.head())
 
-    This uses caching to avoid having to read the file every time. If we were
-    reading from an HTTP endpoint instead of a file, it's a good idea to set
-    a maximum age to the cache with the TTL argument: @st.cache_data(ttl='1d')
-    """
+    # Preprocess
+    X = data[['location', 'time_of_day', 'day_of_week', 'crime_type', 'arrests_last_year', 'population_density']].copy()
+    X['location'] = X['location'].map({'A': 0, 'B': 1, 'C': 2, 'D': 3, 'E': 4})
+    y = data['reported_crime']
 
-    # Instead of a CSV on disk, you could read from an HTTP endpoint here too.
-    DATA_FILENAME = Path(__file__).parent/'data/gdp_data.csv'
-    raw_gdp_df = pd.read_csv(DATA_FILENAME)
+    # Train-test split
+    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
 
-    MIN_YEAR = 1960
-    MAX_YEAR = 2022
+    # Train model
+    model = RandomForestClassifier()
+    model.fit(X_train, y_train)
+    preds = model.predict(X_test)
 
-    # The data above has columns like:
-    # - Country Name
-    # - Country Code
-    # - [Stuff I don't care about]
-    # - GDP for 1960
-    # - GDP for 1961
-    # - GDP for 1962
-    # - ...
-    # - GDP for 2022
-    #
-    # ...but I want this instead:
-    # - Country Name
-    # - Country Code
-    # - Year
-    # - GDP
-    #
-    # So let's pivot all those year-columns into two: Year and GDP
-    gdp_df = raw_gdp_df.melt(
-        ['Country Code'],
-        [str(x) for x in range(MIN_YEAR, MAX_YEAR + 1)],
-        'Year',
-        'GDP',
-    )
+    st.write("### Prediction Results")
+    st.write(f"Sample Predictions: {preds[:10]}")
 
-    # Convert years from string to integers
-    gdp_df['Year'] = pd.to_numeric(gdp_df['Year'])
+    # Bias check
+    sensitive_feature = X_test['location']
+    dpd = demographic_parity_difference(y_test, preds, sensitive_features=sensitive_feature)
+    st.write(f"### Demographic Parity Difference (Location Bias): {dpd:.4f}")
 
-    return gdp_df
+    if abs(dpd) > 0.1:
+        st.warning("⚠️ Possible bias detected! Review or retrain your model.")
+    else:
+        st.success("✅ No significant bias detected.")
 
-gdp_df = get_gdp_data()
+    # Explainability
+    st.write("### Explainable AI (SHAP Summary Plot)")
+    explainer = shap.TreeExplainer(model)
+    shap_values = explainer.shap_values(X_test)
 
-# -----------------------------------------------------------------------------
-# Draw the actual page
+    # SHAP summary plot
+    plt.title("Feature Importance")
+    shap.summary_plot(shap_values, X_test, show=False)
+    st.pyplot(plt.gcf())
+    plt.clf()
 
-# Set the title that appears at the top of the page.
-'''
-# :earth_americas: GDP dashboard
-
-Browse GDP data from the [World Bank Open Data](https://data.worldbank.org/) website. As you'll
-notice, the data only goes to 2022 right now, and datapoints for certain years are often missing.
-But it's otherwise a great (and did I mention _free_?) source of data.
-'''
-
-# Add some spacing
-''
-''
-
-min_value = gdp_df['Year'].min()
-max_value = gdp_df['Year'].max()
-
-from_year, to_year = st.slider(
-    'Which years are you interested in?',
-    min_value=min_value,
-    max_value=max_value,
-    value=[min_value, max_value])
-
-countries = gdp_df['Country Code'].unique()
-
-if not len(countries):
-    st.warning("Select at least one country")
-
-selected_countries = st.multiselect(
-    'Which countries would you like to view?',
-    countries,
-    ['DEU', 'FRA', 'GBR', 'BRA', 'MEX', 'JPN'])
-
-''
-''
-''
-
-# Filter the data
-filtered_gdp_df = gdp_df[
-    (gdp_df['Country Code'].isin(selected_countries))
-    & (gdp_df['Year'] <= to_year)
-    & (from_year <= gdp_df['Year'])
-]
-
-st.header('GDP over time', divider='gray')
-
-''
-
-st.line_chart(
-    filtered_gdp_df,
-    x='Year',
-    y='GDP',
-    color='Country Code',
-)
-
-''
-''
-
-
-first_year = gdp_df[gdp_df['Year'] == from_year]
-last_year = gdp_df[gdp_df['Year'] == to_year]
-
-st.header(f'GDP in {to_year}', divider='gray')
-
-''
-
-cols = st.columns(4)
-
-for i, country in enumerate(selected_countries):
-    col = cols[i % len(cols)]
-
-    with col:
-        first_gdp = first_year[first_year['Country Code'] == country]['GDP'].iat[0] / 1000000000
-        last_gdp = last_year[last_year['Country Code'] == country]['GDP'].iat[0] / 1000000000
-
-        if math.isnan(first_gdp):
-            growth = 'n/a'
-            delta_color = 'off'
-        else:
-            growth = f'{last_gdp / first_gdp:,.2f}x'
-            delta_color = 'normal'
-
-        st.metric(
-            label=f'{country} GDP',
-            value=f'{last_gdp:,.0f}B',
-            delta=growth,
-            delta_color=delta_color
-        )
+    st.info("Model trained & explained successfully.")
+else:
+    st.info("Please upload a CSV file to begin.")
